@@ -1,3 +1,5 @@
+import 'russian_numbers.dart';
+
 class ParsedCommand {
   final String title;
   final String type;
@@ -10,8 +12,17 @@ class ParsedCommand {
   });
 }
 
+/// Границы слова для кириллицы.
+///
+/// `\b` в Dart (как в JavaScript) считает словесными только латиницу и цифры,
+/// поэтому для русских слов он не срабатывает: «\bзавтра\b» не находит
+/// «завтра». Расставляем границы явно.
+String _word(String body) => '(?<![А-Яа-яЁё])$body(?![А-Яа-яЁё])';
+
 ParsedCommand parseCommand(String input, String fallbackType) {
-  final original = input.trim();
+  // Модель распознаёт числа словами, поэтому «через пять минут» сначала
+  // превращаем в «через 5 минут».
+  final original = normalizeRussianNumbers(input.trim());
   final lower = original.toLowerCase();
 
   String type = fallbackType;
@@ -27,54 +38,88 @@ ParsedCommand parseCommand(String input, String fallbackType) {
   DateTime? date;
   String cleaned = original;
 
-  if (RegExp(r'\bпослезавтра\b', caseSensitive: false).hasMatch(cleaned)) {
+  final relativeDate = RegExp(
+    _word(r'послезавтра'),
+    caseSensitive: false,
+  );
+  final tomorrow = RegExp(_word(r'завтра'), caseSensitive: false);
+  final today = RegExp(_word(r'сегодня'), caseSensitive: false);
+
+  if (relativeDate.hasMatch(cleaned)) {
     date = DateTime(now.year, now.month, now.day + 2);
-    cleaned = cleaned.replaceAll(
-      RegExp(r'\bпослезавтра\b', caseSensitive: false),
-      '',
-    );
-  } else if (RegExp(r'\bзавтра\b', caseSensitive: false).hasMatch(cleaned)) {
+    cleaned = cleaned.replaceAll(relativeDate, '');
+  } else if (tomorrow.hasMatch(cleaned)) {
     date = DateTime(now.year, now.month, now.day + 1);
-    cleaned = cleaned.replaceAll(
-      RegExp(r'\bзавтра\b', caseSensitive: false),
-      '',
-    );
-  } else if (RegExp(r'\bсегодня\b', caseSensitive: false).hasMatch(cleaned)) {
+    cleaned = cleaned.replaceAll(tomorrow, '');
+  } else if (today.hasMatch(cleaned)) {
     date = DateTime(now.year, now.month, now.day);
-    cleaned = cleaned.replaceAll(
-      RegExp(r'\bсегодня\b', caseSensitive: false),
-      '',
-    );
+    cleaned = cleaned.replaceAll(today, '');
   }
 
   int? hour;
   int? minute;
 
-  final colonTime = RegExp(r'\b(?:в\s*)?([01]?\d|2[0-3])[:.]([0-5]\d)\b')
-      .firstMatch(cleaned);
+  // Относительное время: «через 5 минут», «через 2 часа», «через 3 дня».
+  final relative = RegExp(
+    _word(r'через\s+(\d{1,3})\s*(минут(?:у|ы)?|час(?:а|ов)?|день|дня|дней)'),
+    caseSensitive: false,
+  ).firstMatch(cleaned);
 
-  if (colonTime != null) {
-    hour = int.tryParse(colonTime.group(1)!);
-    minute = int.tryParse(colonTime.group(2)!);
-    cleaned = cleaned.replaceRange(colonTime.start, colonTime.end, ' ');
-  } else {
-    final hourTime = RegExp(
-      r'\bв\s+(\d{1,2})(?:\s*(?:час(?:а|ов)?))?(?:\s*(утра|дня|вечера|ночи))?\b',
-      caseSensitive: false,
-    ).firstMatch(cleaned);
+  if (relative != null) {
+    final amount = int.tryParse(relative.group(1)!);
+    final unit = relative.group(2)!.toLowerCase();
 
-    if (hourTime != null) {
-      var parsedHour = int.tryParse(hourTime.group(1)!);
-      final period = hourTime.group(2)?.toLowerCase();
+    if (amount != null) {
+      if (unit.startsWith('минут')) {
+        date = now.add(Duration(minutes: amount));
+      } else if (unit.startsWith('час')) {
+        date = now.add(Duration(hours: amount));
+      } else {
+        date = DateTime(now.year, now.month, now.day + amount);
+      }
+      cleaned = cleaned.replaceRange(relative.start, relative.end, ' ');
+    }
+  }
 
-      if (parsedHour != null && parsedHour >= 1 && parsedHour <= 12) {
-        if (period == 'вечера' && parsedHour < 12) parsedHour += 12;
-        if (period == 'дня' && parsedHour < 12) parsedHour += 12;
-        if (period == 'ночи' && parsedHour == 12) parsedHour = 0;
-        if (period == 'утра' && parsedHour == 12) parsedHour = 0;
+  if (date == null) {
+    final colonTime = RegExp(r'(\d{1,2})[:.](\d{2})(?!\d)').firstMatch(cleaned);
+
+    if (colonTime != null) {
+      final parsedHour = int.tryParse(colonTime.group(1)!);
+      final parsedMinute = int.tryParse(colonTime.group(2)!);
+
+      if (parsedHour != null &&
+          parsedHour <= 23 &&
+          parsedMinute != null &&
+          parsedMinute <= 59) {
         hour = parsedHour;
-        minute = 0;
-        cleaned = cleaned.replaceRange(hourTime.start, hourTime.end, ' ');
+        minute = parsedMinute;
+        cleaned = cleaned.replaceRange(colonTime.start, colonTime.end, ' ');
+      }
+    } else {
+      final hourTime = RegExp(
+        _word(
+          r'в\s+(\d{1,2})(?:\s*(?:час(?:а|ов)?))?(?:\s*(утра|дня|вечера|ночи))?',
+        ),
+        caseSensitive: false,
+      ).firstMatch(cleaned);
+
+      if (hourTime != null) {
+        final parsedHour = int.tryParse(hourTime.group(1)!);
+        final period = hourTime.group(2)?.toLowerCase();
+
+        if (parsedHour != null && parsedHour >= 1 && parsedHour <= 23) {
+          var result = parsedHour;
+          if (result <= 12) {
+            if (period == 'вечера' || period == 'дня') result += 12;
+            if (period == 'ночи' || period == 'утра') {
+              if (result == 12) result = 0;
+            }
+          }
+          hour = result;
+          minute = 0;
+          cleaned = cleaned.replaceRange(hourTime.start, hourTime.end, ' ');
+        }
       }
     }
   }

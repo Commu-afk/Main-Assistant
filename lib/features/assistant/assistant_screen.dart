@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import '../../core/utils/command_parser.dart';
 import '../../data/database/task_database.dart';
+import '../stt/sherpa_stt_service.dart';
 
 class AssistantScreen extends StatefulWidget {
   const AssistantScreen({super.key});
@@ -14,12 +14,11 @@ class AssistantScreen extends StatefulWidget {
 class _AssistantScreenState extends State<AssistantScreen> {
   final TextEditingController _titleController = TextEditingController();
   final TextEditingController _searchController = TextEditingController();
-  final stt.SpeechToText _speech = stt.SpeechToText();
+  final _sherpa = SherpaSttService.instance;
 
-  bool _speechAvailable = false;
   bool _isListening = false;
-  String _voiceStatus = 'Микрофон ещё не запущен';
-  String? _speechLocaleId;
+  bool _isTranscribing = false;
+  String _voiceStatus = 'Загрузка модели Sherpa-ONNX...';
 
   String _searchQuery = '';
   bool _searchWasRun = false;
@@ -32,115 +31,83 @@ class _AssistantScreenState extends State<AssistantScreen> {
   void initState() {
     super.initState();
     _loadEntries();
-    _initSpeech();
+    _initSherpa();
   }
 
   @override
   void dispose() {
     _titleController.dispose();
     _searchController.dispose();
-    _speech.stop();
+    _sherpa.cancel();
     super.dispose();
   }
 
-  Future<void> _initSpeech() async {
+  Future<void> _initSherpa() async {
     try {
-      final available = await _speech.initialize(
-        onStatus: (status) {
-          if (!mounted) return;
-          setState(() {
-            _isListening = status == 'listening';
-            if (status == 'done' || status == 'notListening') {
-              _voiceStatus = 'Распознавание завершено';
-            }
-          });
-        },
-        onError: (error) {
-          if (!mounted) return;
-          setState(() {
-            _isListening = false;
-            _voiceStatus = 'Ошибка распознавания: ${error.errorMsg}';
-          });
-        },
-      );
-
-      if (!mounted) return;
-
-      String? localeId = _speechLocaleId;
-      if (available && localeId == null) {
-        try {
-          final locales = await _speech.locales();
-          for (final locale in locales) {
-            final id = locale.localeId.toLowerCase();
-            if (id.startsWith('ru')) {
-              localeId = locale.localeId;
-              break;
-            }
-          }
-          if (localeId == null && locales.isNotEmpty) {
-            localeId = locales.first.localeId;
-          }
-        } catch (_) {}
-      }
-
       setState(() {
-        _speechAvailable = available;
-        _speechLocaleId = localeId;
-        _voiceStatus = available
-            ? (localeId == null
-                ? 'Микрофон готов'
-                : 'Микрофон готов ($localeId)')
-            : 'Распознавание речи недоступно';
+        _voiceStatus = 'Загрузка русской модели Sherpa-ONNX...';
+      });
+      await _sherpa.initialize();
+      if (!mounted) return;
+      setState(() {
+        _voiceStatus = 'Готово. Нажмите «Говорить», скажите фразу и нажмите «Стоп»';
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _speechAvailable = false;
-        _voiceStatus = 'Не удалось запустить микрофон: $e';
+        _voiceStatus = 'Модель не загружена: $e';
       });
     }
   }
 
   Future<void> _toggleListening() async {
-    if (!_speechAvailable) {
-      await _initSpeech();
-      if (!_speechAvailable) {
-        _showMessage(_voiceStatus);
-        return;
-      }
-    }
+    if (_isTranscribing) return;
 
+    // Стоп -> распознаём
     if (_isListening) {
-      await _speech.stop();
+      setState(() {
+        _isListening = false;
+        _isTranscribing = true;
+        _voiceStatus = 'Распознаю...';
+      });
+
+      try {
+        final text = await _sherpa.stopAndTranscribe();
+        if (!mounted) return;
+
+        if (text.isEmpty) {
+          setState(() {
+            _voiceStatus = 'Ничего не распознано, попробуйте ещё раз';
+          });
+          return;
+        }
+
+        setState(() {
+          _titleController.text = text;
+          _titleController.selection = TextSelection.collapsed(
+            offset: text.length,
+          );
+          _voiceStatus = 'Распознано: $text';
+        });
+      } catch (e) {
+        if (!mounted) return;
+        setState(() {
+          _voiceStatus = 'Ошибка распознавания: $e';
+        });
+      } finally {
+        if (mounted) setState(() => _isTranscribing = false);
+      }
       return;
     }
 
+    // Старт записи
     try {
+      await _sherpa.startRecording();
+      if (!mounted) return;
       setState(() {
+        _isListening = true;
         _voiceStatus = 'Слушаю... Говорите по-русски';
       });
-
-      await _speech.listen(
-        listenOptions: stt.SpeechListenOptions(
-          localeId: _speechLocaleId ?? 'ru-RU',
-          listenFor: const Duration(seconds: 15),
-        ),
-        onResult: (result) {
-          if (!mounted) return;
-          setState(() {
-            _titleController.text = result.recognizedWords;
-            _titleController.selection = TextSelection.collapsed(
-              offset: _titleController.text.length,
-            );
-            _voiceStatus = result.finalResult
-                ? 'Распознано: ${result.recognizedWords}'
-                : 'Слушаю: ${result.recognizedWords}';
-          });
-          if (result.finalResult) {
-            _speech.stop();
-          }
-        },
-      );
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -412,11 +379,28 @@ class _AssistantScreenState extends State<AssistantScreen> {
                           Row(
                             children: [
                               FilledButton.tonalIcon(
-                                onPressed: _toggleListening,
-                                icon: Icon(_isListening ? Icons.stop : Icons.mic),
-                                label: Text(_isListening ? 'Остановить' : 'Говорить'),
+                                onPressed: _isTranscribing ? null : _toggleListening,
+                                icon: Icon(
+                                  _isListening ? Icons.stop : Icons.mic,
+                                ),
+                                label: Text(_isListening ? 'Стоп' : 'Говорить'),
                               ),
-                              const SizedBox(width: 12),
+                              const SizedBox(width: 8),
+                              IconButton(
+                                tooltip: 'Перезагрузить модель Sherpa',
+                                onPressed: _isTranscribing
+                                    ? null
+                                    : () async {
+                                        await _sherpa.cancel();
+                                        setState(() {
+                                          _isListening = false;
+                                          _voiceStatus = 'Перезагрузка...';
+                                        });
+                                        await _initSherpa();
+                                      },
+                                icon: const Icon(Icons.refresh),
+                              ),
+                              const SizedBox(width: 4),
                               Expanded(
                                 child: Text(
                                   _voiceStatus,

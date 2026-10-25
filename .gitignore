@@ -27,10 +27,17 @@ assets/models/*.gguf
 assets/models/*.bin
 assets/models/*.ggml
 assets/models/*.onnx
+assets/stt/*
+!assets/stt/.gitkeep
+native/*
+!native/.gitkeep
 *.gguf
 *.bin
 *.ggml
 *.onnx
+*.dll
+*.so
+*.dylib
 
 # Local env
 .env
