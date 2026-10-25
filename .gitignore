@@ -1,0 +1,41 @@
+# Dart/Flutter
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+*.freezed.dart
+*.g.dart
+*.mocks.dart
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Models (NEVER COMMIT)
+assets/models/*.gguf
+assets/models/*.bin
+assets/models/*.ggml
+assets/models/*.onnx
+*.gguf
+*.bin
+*.ggml
+*.onnx
+
+# Local env
+.env
+local.properties
+
+# Logs
+*.log
+whisper_log.txt
