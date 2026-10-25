@@ -27,6 +27,7 @@ assets/models/*.gguf
 assets/models/*.bin
 assets/models/*.ggml
 assets/models/*.onnx
+*.gguf.part
 assets/stt/*
 !assets/stt/.gitkeep
 assets/tts/*
