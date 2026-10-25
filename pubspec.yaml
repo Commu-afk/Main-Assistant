@@ -38,6 +38,8 @@ dependencies:
   path_provider: ^2.1.6
   record: ^6.0.0
   sherpa_onnx: 1.13.8
+  archive: ^4.5.2
+  audioplayers: ^6.8.1
 
 dev_dependencies:
   flutter_test:
@@ -63,6 +65,7 @@ flutter:
 
   assets:
     - assets/stt/sherpa/ru/
+    - assets/tts/sherpa/ru.zip
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

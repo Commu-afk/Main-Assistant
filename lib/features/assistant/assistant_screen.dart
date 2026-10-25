@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../core/utils/command_parser.dart';
 import '../../data/database/task_database.dart';
 import '../stt/sherpa_stt_service.dart';
+import '../tts/sherpa_tts_service.dart';
 
 class AssistantScreen extends StatefulWidget {
   const AssistantScreen({super.key});
@@ -15,9 +16,11 @@ class _AssistantScreenState extends State<AssistantScreen> {
   final TextEditingController _titleController = TextEditingController();
   final TextEditingController _searchController = TextEditingController();
   final _sherpa = SherpaSttService.instance;
+  final _tts = SherpaTtsService.instance;
 
   bool _isListening = false;
   bool _isTranscribing = false;
+  bool _isSpeaking = false;
   String _voiceStatus = 'Загрузка модели Sherpa-ONNX...';
 
   String _searchQuery = '';
@@ -116,6 +119,40 @@ class _AssistantScreenState extends State<AssistantScreen> {
       });
       _showMessage(_voiceStatus);
     }
+  }
+
+  Future<void> _speak() async {
+    final text = _titleController.text.trim();
+    if (text.isEmpty) {
+      _showMessage('Нечего озвучивать: введите текст');
+      return;
+    }
+
+    setState(() {
+      _isSpeaking = true;
+      _voiceStatus = 'Синтезирую речь...';
+    });
+
+    try {
+      await _tts.speak(text);
+      if (!mounted) return;
+      setState(() => _voiceStatus = 'Озвучено: $text');
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _voiceStatus = 'Ошибка озвучки: $e');
+      _showMessage(_voiceStatus);
+    } finally {
+      if (mounted) setState(() => _isSpeaking = false);
+    }
+  }
+
+  Future<void> _stopSpeaking() async {
+    await _tts.stop();
+    if (!mounted) return;
+    setState(() {
+      _isSpeaking = false;
+      _voiceStatus = 'Озвучка остановлена';
+    });
   }
 
   Future<void> _loadEntries() async {
@@ -459,13 +496,28 @@ class _AssistantScreenState extends State<AssistantScreen> {
                             ],
                           ),
                           const SizedBox(height: 12),
-                          SizedBox(
-                            width: double.infinity,
-                            child: FilledButton.icon(
-                              onPressed: _addEntry,
-                              icon: const Icon(Icons.add),
-                              label: const Text('Сохранить'),
-                            ),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: FilledButton.icon(
+                                  onPressed: _addEntry,
+                                  icon: const Icon(Icons.add),
+                                  label: const Text('Сохранить'),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              IconButton.filledTonal(
+                                tooltip: _isSpeaking
+                                    ? 'Остановить озвучку'
+                                    : 'Озвучить текст по-русски',
+                                onPressed: _isSpeaking ? _stopSpeaking : _speak,
+                                icon: Icon(
+                                  _isSpeaking
+                                      ? Icons.stop_circle_outlined
+                                      : Icons.volume_up,
+                                ),
+                              ),
+                            ],
                           ),
                         ],
                       ),

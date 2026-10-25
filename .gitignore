@@ -29,6 +29,8 @@ assets/models/*.ggml
 assets/models/*.onnx
 assets/stt/*
 !assets/stt/.gitkeep
+assets/tts/*
+!assets/tts/.gitkeep
 native/*
 !native/.gitkeep
 *.gguf
