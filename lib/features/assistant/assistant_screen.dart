@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 
+import '../../core/desktop/desktop_lifecycle.dart';
 import '../../core/utils/command_parser.dart';
 import '../../data/database/task_database.dart';
 import '../reminders/notification_service.dart';
 import '../reminders/reminder_scheduler.dart';
+import '../settings/desktop_settings_dialog.dart';
 import '../stt/sherpa_stt_service.dart';
 import '../tts/sherpa_tts_service.dart';
 
@@ -531,6 +533,15 @@ class _AssistantScreenState extends State<AssistantScreen> {
         title: const Text('Мой ассистент'),
         centerTitle: true,
         actions: [
+          if (DesktopLifecycle.instance.isSupported)
+            IconButton(
+              tooltip: 'Работа в Windows',
+              icon: const Icon(Icons.settings_outlined),
+              onPressed: () => showDialog<void>(
+                context: context,
+                builder: (_) => const DesktopSettingsDialog(),
+              ),
+            ),
           PopupMenuButton<String>(
             tooltip: 'Напоминания',
             icon: const Icon(Icons.notifications_outlined),

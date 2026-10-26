@@ -4,9 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'core/app_shell.dart';
+import 'core/desktop/desktop_lifecycle.dart';
 import 'features/settings/app_settings.dart';
 
-Future<void> main() async {
+Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
 
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
@@ -14,6 +15,9 @@ Future<void> main() async {
   }
 
   await AppSettings.instance.load();
+
+  final startHidden = args.contains('--hidden');
+  await DesktopLifecycle.instance.initialize(startHidden: startHidden);
 
   runApp(const LocalAssistantApp());
 }

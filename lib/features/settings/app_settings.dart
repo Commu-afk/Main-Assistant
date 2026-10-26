@@ -17,12 +17,16 @@ class AppSettings {
 
   bool _autoSpeak = true;
   bool _voiceLoop = true;
+  bool _closeToTray = true;
 
   /// Озвучивать ответ модели автоматически.
   bool get autoSpeak => _autoSpeak;
 
   /// После распознавания сразу отправлять вопрос модели.
   bool get voiceLoop => _voiceLoop;
+
+  /// Закрывать окно в трей, а не завершать приложение.
+  bool get closeToTray => _closeToTray;
 
   Future<void> load() async {
     try {
@@ -34,6 +38,7 @@ class AppSettings {
 
       _autoSpeak = data['autoSpeak'] as bool? ?? _autoSpeak;
       _voiceLoop = data['voiceLoop'] as bool? ?? _voiceLoop;
+      _closeToTray = data['closeToTray'] as bool? ?? _closeToTray;
     } catch (_) {
       // Битый файл настроек не должен мешать запуску.
     }
@@ -49,11 +54,20 @@ class AppSettings {
     await _save();
   }
 
+  Future<void> setCloseToTray(bool value) async {
+    _closeToTray = value;
+    await _save();
+  }
+
   Future<void> _save() async {
     final file = await _file();
     await file.parent.create(recursive: true);
     await file.writeAsString(
-      jsonEncode({'autoSpeak': _autoSpeak, 'voiceLoop': _voiceLoop}),
+      jsonEncode({
+        'autoSpeak': _autoSpeak,
+        'voiceLoop': _voiceLoop,
+        'closeToTray': _closeToTray,
+      }),
       flush: true,
     );
   }
