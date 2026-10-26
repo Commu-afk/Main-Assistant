@@ -15,7 +15,8 @@ class AssistantScreen extends StatefulWidget {
 }
 
 class _AssistantScreenState extends State<AssistantScreen> {
-  final TextEditingController _titleController = TextEditingController();
+  final TextEditingController _voiceController = TextEditingController();
+  final TextEditingController _manualController = TextEditingController();
   final TextEditingController _searchController = TextEditingController();
   final _sherpa = SherpaSttService.instance;
   final _tts = SherpaTtsService.instance;
@@ -27,8 +28,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
 
   String _searchQuery = '';
   bool _searchWasRun = false;
-  String _selectedType = 'task';
-  DateTime? _dueAt;
+  DateTime? _manualDueAt;
   List<Map<String, Object?>> _entries = [];
   bool _loading = true;
 
@@ -37,16 +37,24 @@ class _AssistantScreenState extends State<AssistantScreen> {
     super.initState();
     _loadEntries();
     _initSherpa();
+    _voiceController.addListener(_onComposerChanged);
+    _manualController.addListener(_onComposerChanged);
     ReminderScheduler.instance.addListener(_onRemindersChanged);
   }
 
   @override
   void dispose() {
     ReminderScheduler.instance.removeListener(_onRemindersChanged);
-    _titleController.dispose();
+    _voiceController.dispose();
+    _manualController.dispose();
     _searchController.dispose();
     _sherpa.cancel();
     super.dispose();
+  }
+
+  /// Пересобираем подсказку «что будет создано» при редактировании текста.
+  void _onComposerChanged() {
+    if (mounted) setState(() {});
   }
 
   /// Планировщик показал напоминание — обновляем список, чтобы был виден
@@ -63,7 +71,8 @@ class _AssistantScreenState extends State<AssistantScreen> {
       await _sherpa.initialize();
       if (!mounted) return;
       setState(() {
-        _voiceStatus = 'Готово. Нажмите «Говорить», скажите фразу и нажмите «Стоп»';
+        _voiceStatus =
+            'Готово. Нажмите «Говорить», скажите фразу и нажмите «Стоп»';
       });
     } catch (e) {
       if (!mounted) return;
@@ -96,8 +105,8 @@ class _AssistantScreenState extends State<AssistantScreen> {
         }
 
         setState(() {
-          _titleController.text = text;
-          _titleController.selection = TextSelection.collapsed(
+          _voiceController.text = text;
+          _voiceController.selection = TextSelection.collapsed(
             offset: text.length,
           );
           _voiceStatus = 'Распознано: $text';
@@ -115,6 +124,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
 
     // Старт записи
     try {
+      if (_isSpeaking) await _stopSpeaking();
       await _sherpa.startRecording();
       if (!mounted) return;
       setState(() {
@@ -132,9 +142,9 @@ class _AssistantScreenState extends State<AssistantScreen> {
   }
 
   Future<void> _speak() async {
-    final text = _titleController.text.trim();
+    final text = _voiceController.text.trim();
     if (text.isEmpty) {
-      _showMessage('Нечего озвучивать: введите текст');
+      _showMessage('Нечего озвучивать: сначала распознайте фразу');
       return;
     }
 
@@ -186,7 +196,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
       shown
           ? 'Уведомление отправлено'
           : 'Уведомления недоступны: '
-              '${service.lastError ?? 'платформа не поддерживается'}',
+                '${service.lastError ?? 'платформа не поддерживается'}',
     );
   }
 
@@ -205,47 +215,136 @@ class _AssistantScreenState extends State<AssistantScreen> {
     }
   }
 
-  Future<void> _addEntry() async {
-    final command = _titleController.text.trim();
+  Future<void> _create({
+    required TextEditingController controller,
+    required bool fromVoice,
+    DateTime? explicitDue,
+  }) async {
+    final command = controller.text.trim();
     if (command.isEmpty) {
-      _showMessage('Введите команду или название записи');
-      return;
-    }
-
-    final parsed = parseCommand(command, _selectedType);
-    if (parsed.title.isEmpty) {
       _showMessage(
-        'Не удалось определить название. Например: '
-        'Напомни завтра в 9:00 купить хлеб',
+        fromVoice
+            ? 'Сначала скажите фразу, затем нажмите «Создать»'
+            : 'Введите текст записи',
       );
       return;
     }
 
-    final savedDate = parsed.dueAt ?? _dueAt;
+    final parsed = parseCommand(command, 'task');
+    final title = parsed.title.isEmpty && parsed.type != 'task'
+        ? _typeLabel(parsed.type)
+        : parsed.title;
+    if (title.isEmpty) {
+      _showMessage(
+        'Не удалось выделить название. Добавьте суть, например: '
+        '«Напомни завтра в 9:00 купить хлеб»',
+      );
+      return;
+    }
+
+    // Выбранное вручную время имеет приоритет, иначе — то, что нашёл разбор.
+    final savedDate = fromVoice ? parsed.dueAt : (explicitDue ?? parsed.dueAt);
+
+    if (parsed.type != 'task' && savedDate == null) {
+      _showMessage(
+        parsed.type == 'meeting'
+            ? 'Похоже на встречу, но время не указано. Добавьте, например: '
+                  '«Завтра в 15:00 встреча с Ивановым»'
+            : 'Похоже на напоминание, но время не указано. Добавьте, например: '
+                  '«Напомни через час позвонить маме»',
+      );
+      return;
+    }
 
     try {
       await TaskDatabase.instance.addEntry(
-        title: parsed.title,
+        title: title,
         type: parsed.type,
         dueAt: savedDate,
       );
 
-      _titleController.clear();
-      setState(() {
-        _dueAt = null;
-        _selectedType = 'task';
-      });
+      controller.clear();
+      if (!fromVoice) setState(() => _manualDueAt = null);
 
       await _loadEntries();
 
       final dateText = savedDate == null
           ? ''
-          : ' (${_formatDate(savedDate.toIso8601String())})';
+          : ' · ${_formatDate(savedDate.toIso8601String())}';
 
-      _showMessage('Сохранено: ${parsed.title}$dateText');
+      _showMessage('Создано: ${_typeLabel(parsed.type)} «$title»$dateText');
     } catch (e) {
       _showMessage('Не удалось сохранить запись: $e');
     }
+  }
+
+  /// Строка-подсказка: что именно будет создано после нажатия «Создать».
+  Widget _buildPreview(
+    TextEditingController controller,
+    DateTime? explicitDue,
+  ) {
+    final raw = controller.text.trim();
+    if (raw.isEmpty) {
+      return Text(
+        'Тип записи и время определю автоматически.',
+        style: Theme.of(context).textTheme.bodySmall,
+      );
+    }
+
+    final parsed = parseCommand(raw, 'task');
+    final due = explicitDue ?? parsed.dueAt;
+    final title = parsed.title.isEmpty && parsed.type != 'task'
+        ? _typeLabel(parsed.type)
+        : parsed.title;
+    final titleEmpty = title.isEmpty;
+    final needsTime = parsed.type != 'task' && due == null;
+    final problem = titleEmpty || needsTime;
+
+    final buffer = StringBuffer();
+    if (titleEmpty) {
+      buffer.write('Не понял название');
+    } else {
+      buffer.write('«$title»');
+    }
+    buffer.write(' · ${_typeLabel(parsed.type)}');
+
+    if (due != null) {
+      buffer.write(' · ${_formatDate(due.toIso8601String())}');
+    } else if (needsTime) {
+      buffer.write(' · нужно время');
+    } else {
+      buffer.write(' · без срока');
+    }
+
+    final colors = Theme.of(context).colorScheme;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: problem
+            ? colors.errorContainer.withValues(alpha: 0.35)
+            : colors.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            problem ? Icons.info_outline : Icons.auto_awesome,
+            size: 16,
+            color: problem ? colors.error : colors.primary,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              buffer.toString(),
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   void _runSearch() {
@@ -277,9 +376,11 @@ class _AssistantScreenState extends State<AssistantScreen> {
     final weekEnd = today.add(const Duration(days: 7));
 
     final wantsToday = query.contains('сегодня');
-    final wantsTomorrow = query.contains('завтра') && !query.contains('послезавтра');
+    final wantsTomorrow =
+        query.contains('завтра') && !query.contains('послезавтра');
     final wantsDayAfterTomorrow = query.contains('послезавтра');
-    final wantsWeek = query.contains('неделе') ||
+    final wantsWeek =
+        query.contains('неделе') ||
         query.contains('неделю') ||
         query.contains('ближайшую неделю');
 
@@ -306,7 +407,12 @@ class _AssistantScreenState extends State<AssistantScreen> {
 
     final terms = remaining
         .split(' ')
-        .map((word) => word.replaceAll(RegExp(r'^[^a-zа-яё0-9]+|[^a-zа-яё0-9]+$', caseSensitive: false), ''))
+        .map(
+          (word) => word.replaceAll(
+            RegExp(r'^[^a-zа-яё0-9]+|[^a-zа-яё0-9]+$', caseSensitive: false),
+            '',
+          ),
+        )
         .where((word) => word.length >= 2)
         .toList();
 
@@ -319,7 +425,11 @@ class _AssistantScreenState extends State<AssistantScreen> {
 
       if (wantsToday || wantsTomorrow || wantsDayAfterTomorrow || wantsWeek) {
         if (parsedDate == null) return false;
-        final dueDay = DateTime(parsedDate.year, parsedDate.month, parsedDate.day);
+        final dueDay = DateTime(
+          parsedDate.year,
+          parsedDate.month,
+          parsedDate.day,
+        );
 
         if (wantsToday && dueDay != today) return false;
         if (wantsTomorrow && dueDay != tomorrow) return false;
@@ -342,7 +452,9 @@ class _AssistantScreenState extends State<AssistantScreen> {
     if (title.contains(term)) return true;
     if (term.length >= 5) {
       final stem = term.replaceFirst(
-        RegExp(r'(ями|ами|ого|ему|ому|ыми|ими|ах|ях|ой|ей|ый|ий|ая|яя|ое|ее|ую|юю|ом|ем|ам|ям|ы|и|а|я|у|ю|е)$'),
+        RegExp(
+          r'(ями|ами|ого|ему|ому|ыми|ими|ах|ях|ой|ей|ый|ий|ая|яя|ое|ее|ую|юю|ом|ем|ам|ям|ы|и|а|я|у|ю|е)$',
+        ),
         '',
       );
       if (stem.length >= 3 && title.contains(stem)) return true;
@@ -355,7 +467,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
 
     final date = await showDatePicker(
       context: context,
-      initialDate: _dueAt ?? now,
+      initialDate: _manualDueAt ?? now,
       firstDate: DateTime(2020),
       lastDate: DateTime(2100),
     );
@@ -364,13 +476,13 @@ class _AssistantScreenState extends State<AssistantScreen> {
 
     final time = await showTimePicker(
       context: context,
-      initialTime: TimeOfDay.fromDateTime(_dueAt ?? now),
+      initialTime: TimeOfDay.fromDateTime(_manualDueAt ?? now),
     );
 
     if (time == null || !mounted) return;
 
     setState(() {
-      _dueAt = DateTime(
+      _manualDueAt = DateTime(
         date.year,
         date.month,
         date.day,
@@ -406,9 +518,8 @@ class _AssistantScreenState extends State<AssistantScreen> {
 
   void _showMessage(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
@@ -432,10 +543,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
                 value: 'check',
                 child: Text('Проверить напоминания'),
               ),
-              PopupMenuItem(
-                value: 'test',
-                child: Text('Тест уведомления'),
-              ),
+              PopupMenuItem(value: 'test', child: Text('Тест уведомления')),
             ],
           ),
         ],
@@ -458,20 +566,33 @@ class _AssistantScreenState extends State<AssistantScreen> {
                             'Мои записи: ${_entries.length} · Выполнено: $completed',
                             style: Theme.of(context).textTheme.titleMedium,
                           ),
-                          const SizedBox(height: 16),
-                          TextField(
-                            controller: _titleController,
-                            decoration: const InputDecoration(
-                              labelText: 'Введите команду',
-                              hintText: 'Напомни через 5 минут позвонить маме',
-                              border: OutlineInputBorder(),
-                            ),
-                            onSubmitted: (_) => _addEntry(),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Тип записи и время определяю сам — по тексту команды.',
+                            style: Theme.of(context).textTheme.bodySmall,
                           ),
+                          const SizedBox(height: 16),
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.mic,
+                                size: 18,
+                                color: Theme.of(context).colorScheme.primary,
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                'Голосовой ввод',
+                                style: Theme.of(context).textTheme.titleSmall,
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
                           Row(
                             children: [
                               FilledButton.tonalIcon(
-                                onPressed: _isTranscribing ? null : _toggleListening,
+                                onPressed: _isTranscribing
+                                    ? null
+                                    : _toggleListening,
                                 icon: Icon(
                                   _isListening ? Icons.stop : Icons.mic,
                                 ),
@@ -501,63 +622,35 @@ class _AssistantScreenState extends State<AssistantScreen> {
                               ),
                             ],
                           ),
-                          const SizedBox(height: 12),
-                          DropdownButtonFormField<String>(
-                            initialValue: _selectedType,
+                          const SizedBox(height: 8),
+                          TextField(
+                            controller: _voiceController,
+                            minLines: 1,
+                            maxLines: 3,
                             decoration: const InputDecoration(
-                              labelText: 'Тип записи (если он не указан в команде)',
+                              labelText: 'Распознанный текст (можно исправить)',
+                              hintText:
+                                  'Например: Завтра в 18:00 встреча с Ивановым',
                               border: OutlineInputBorder(),
                             ),
-                            items: const [
-                              DropdownMenuItem(
-                                value: 'task',
-                                child: Text('Задача'),
-                              ),
-                              DropdownMenuItem(
-                                value: 'reminder',
-                                child: Text('Напоминание'),
-                              ),
-                              DropdownMenuItem(
-                                value: 'meeting',
-                                child: Text('Встреча'),
-                              ),
-                            ],
-                            onChanged: (value) {
-                              if (value != null) {
-                                setState(() => _selectedType = value);
-                              }
-                            },
+                            onSubmitted: (_) => _create(
+                              controller: _voiceController,
+                              fromVoice: true,
+                            ),
                           ),
-                          const SizedBox(height: 12),
-                          Row(
-                            children: [
-                              Expanded(
-                                child: OutlinedButton.icon(
-                                  onPressed: _chooseDateTime,
-                                  icon: const Icon(Icons.calendar_month),
-                                  label: Text(
-                                    _dueAt == null
-                                        ? 'Указать дату и время вручную'
-                                        : _formatDate(_dueAt!.toIso8601String()),
-                                  ),
-                                ),
-                              ),
-                              if (_dueAt != null)
-                                IconButton(
-                                  tooltip: 'Убрать дату',
-                                  onPressed: () => setState(() => _dueAt = null),
-                                  icon: const Icon(Icons.close),
-                                ),
-                            ],
-                          ),
-                          const SizedBox(height: 12),
+                          const SizedBox(height: 8),
+                          _buildPreview(_voiceController, null),
+                          const SizedBox(height: 8),
                           Row(
                             children: [
                               Expanded(
                                 child: FilledButton.icon(
-                                  onPressed: _addEntry,
+                                  onPressed: () => _create(
+                                    controller: _voiceController,
+                                    fromVoice: true,
+                                  ),
                                   icon: const Icon(Icons.add),
-                                  label: const Text('Сохранить'),
+                                  label: const Text('Создать из голоса'),
                                 ),
                               ),
                               const SizedBox(width: 8),
@@ -573,6 +666,88 @@ class _AssistantScreenState extends State<AssistantScreen> {
                                 ),
                               ),
                             ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.keyboard,
+                                size: 18,
+                                color: Theme.of(context).colorScheme.primary,
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                'Ручной ввод',
+                                style: Theme.of(context).textTheme.titleSmall,
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          TextField(
+                            controller: _manualController,
+                            minLines: 1,
+                            maxLines: 3,
+                            decoration: const InputDecoration(
+                              labelText: 'Что создать?',
+                              hintText:
+                                  'Например: Напомни через час позвонить маме',
+                              border: OutlineInputBorder(),
+                            ),
+                            onSubmitted: (_) => _create(
+                              controller: _manualController,
+                              fromVoice: false,
+                              explicitDue: _manualDueAt,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: _chooseDateTime,
+                                  icon: const Icon(Icons.calendar_month),
+                                  label: Text(
+                                    _manualDueAt == null
+                                        ? 'Указать дату и время (необязательно)'
+                                        : _formatDate(
+                                            _manualDueAt!.toIso8601String(),
+                                          ),
+                                  ),
+                                ),
+                              ),
+                              if (_manualDueAt != null)
+                                IconButton(
+                                  tooltip: 'Убрать дату',
+                                  onPressed: () =>
+                                      setState(() => _manualDueAt = null),
+                                  icon: const Icon(Icons.close),
+                                ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          _buildPreview(_manualController, _manualDueAt),
+                          const SizedBox(height: 8),
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton.icon(
+                              onPressed: () => _create(
+                                controller: _manualController,
+                                fromVoice: false,
+                                explicitDue: _manualDueAt,
+                              ),
+                              icon: const Icon(Icons.add),
+                              label: const Text('Создать вручную'),
+                            ),
                           ),
                         ],
                       ),
@@ -624,7 +799,9 @@ class _AssistantScreenState extends State<AssistantScreen> {
                               padding: const EdgeInsets.only(top: 8),
                               child: Align(
                                 alignment: Alignment.centerLeft,
-                                child: Text('Результатов: ${_visibleEntries.length}'),
+                                child: Text(
+                                  'Результатов: ${_visibleEntries.length}',
+                                ),
                               ),
                             ),
                         ],
@@ -635,89 +812,92 @@ class _AssistantScreenState extends State<AssistantScreen> {
                   SizedBox(
                     height: 400,
                     child: _loading
-                        ? const Center(
-                            child: CircularProgressIndicator(),
-                          )
+                        ? const Center(child: CircularProgressIndicator())
                         : _visibleEntries.isEmpty
-                            ? Center(
-                                child: Text(
-                                  _searchWasRun
-                                      ? 'Ничего не найдено. Попробуйте изменить запрос.'
-                                      : 'Записей пока нет. Добавь первую!',
-                                  textAlign: TextAlign.center,
-                                ),
-                              )
-                            : ListView.builder(
-                                itemCount: _visibleEntries.length,
-                                itemBuilder: (context, index) {
-                                  final entry = _visibleEntries[index];
-                                  final id = entry['id'] as int;
-                                  final title = entry['title'] as String;
-                                  final done = entry['is_done'] == 1;
-                                  final type = entry['type'] as String? ?? 'task';
-                                  final dueAt = entry['due_at'] as String?;
-                                  final notifiedAt = entry['notified_at'] as String?;
-                                  final due = dueAt == null
-                                      ? null
-                                      : DateTime.tryParse(dueAt);
-                                  final overdue = due != null &&
-                                      !done &&
-                                      !due.isAfter(DateTime.now());
+                        ? Center(
+                            child: Text(
+                              _searchWasRun
+                                  ? 'Ничего не найдено. Попробуйте изменить запрос.'
+                                  : 'Записей пока нет. Добавь первую!',
+                              textAlign: TextAlign.center,
+                            ),
+                          )
+                        : ListView.builder(
+                            itemCount: _visibleEntries.length,
+                            itemBuilder: (context, index) {
+                              final entry = _visibleEntries[index];
+                              final id = entry['id'] as int;
+                              final title = entry['title'] as String;
+                              final done = entry['is_done'] == 1;
+                              final type = entry['type'] as String? ?? 'task';
+                              final dueAt = entry['due_at'] as String?;
+                              final notifiedAt =
+                                  entry['notified_at'] as String?;
+                              final due = dueAt == null
+                                  ? null
+                                  : DateTime.tryParse(dueAt);
+                              final overdue =
+                                  due != null &&
+                                  !done &&
+                                  !due.isAfter(DateTime.now());
 
-                                  final subtitle = StringBuffer(_typeLabel(type));
-                                  if (dueAt != null) {
-                                    subtitle.write('\n${_formatDate(dueAt)}');
-                                  }
-                                  if (overdue) {
-                                    subtitle.write(
-                                      notifiedAt == null
-                                          ? ' · срок наступил'
-                                          : ' · уведомлено',
-                                    );
-                                  }
+                              final subtitle = StringBuffer(_typeLabel(type));
+                              if (dueAt != null) {
+                                subtitle.write('\n${_formatDate(dueAt)}');
+                              }
+                              if (overdue) {
+                                subtitle.write(
+                                  notifiedAt == null
+                                      ? ' · срок наступил'
+                                      : ' · уведомлено',
+                                );
+                              }
 
-                                  return Card(
-                                    child: ListTile(
-                                      leading: Checkbox(
-                                        value: done,
-                                        onChanged: (value) async {
-                                          await TaskDatabase.instance
-                                              .setTaskDone(id, value ?? false);
-                                          await _loadEntries();
-                                        },
-                                      ),
-                                      title: Text(
-                                        title,
-                                        style: TextStyle(
-                                          decoration: done
-                                              ? TextDecoration.lineThrough
-                                              : null,
-                                        ),
-                                      ),
-                                      subtitle: Text(
-                                        subtitle.toString(),
-                                        style: overdue
-                                            ? TextStyle(
-                                                color: Theme.of(context)
-                                                    .colorScheme
-                                                    .error,
-                                              )
-                                            : null,
-                                      ),
-                                      isThreeLine: dueAt != null,
-                                      trailing: IconButton(
-                                        tooltip: 'Удалить',
-                                        icon: const Icon(Icons.delete_outline),
-                                        onPressed: () async {
-                                          await TaskDatabase.instance
-                                              .deleteTask(id);
-                                          await _loadEntries();
-                                        },
-                                      ),
+                              return Card(
+                                child: ListTile(
+                                  leading: Checkbox(
+                                    value: done,
+                                    onChanged: (value) async {
+                                      await TaskDatabase.instance.setTaskDone(
+                                        id,
+                                        value ?? false,
+                                      );
+                                      await _loadEntries();
+                                    },
+                                  ),
+                                  title: Text(
+                                    title,
+                                    style: TextStyle(
+                                      decoration: done
+                                          ? TextDecoration.lineThrough
+                                          : null,
                                     ),
-                                  );
-                                },
-                              ),
+                                  ),
+                                  subtitle: Text(
+                                    subtitle.toString(),
+                                    style: overdue
+                                        ? TextStyle(
+                                            color: Theme.of(context)
+                                                .colorScheme
+                                                .error,
+                                          )
+                                        : null,
+                                  ),
+                                  isThreeLine: dueAt != null,
+                                  trailing: IconButton(
+                                    tooltip: 'Удалить',
+                                    icon: const Icon(Icons.delete_outline),
+                                    onPressed: () async {
+                                      await TaskDatabase.instance.deleteTask(
+                                        id,
+                                      );
+                                      await _loadEntries();
+                                    },
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
                   ),
                 ],
               ),
