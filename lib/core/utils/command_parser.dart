@@ -28,7 +28,7 @@ ParsedCommand parseCommand(String input, String fallbackType) {
   String type = fallbackType;
   if (lower.contains('встреч')) {
     type = 'meeting';
-  } else if (lower.contains('напомин')) {
+  } else if (lower.contains('напомн')) {
     type = 'reminder';
   } else if (lower.contains('задач')) {
     type = 'task';
@@ -131,7 +131,7 @@ ParsedCommand parseCommand(String input, String fallbackType) {
 
   cleaned = cleaned.replaceFirst(
     RegExp(
-      r'^\s*(добавь|создай|запиши|поставь|назначь)\s+',
+      r'^\s*(добавь|создай|запиши|поставь|назначь|напомни)\s+(мне\s+)?',
       caseSensitive: false,
     ),
     '',

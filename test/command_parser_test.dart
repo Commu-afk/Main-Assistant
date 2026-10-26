@@ -66,5 +66,21 @@ void main() {
       expect(parsed.title, 'купить 5 яблок');
       expect(parsed.dueAt, isNull);
     });
+
+    test('понимает «напомни» и не оставляет его в названии', () {
+      final before = DateTime.now();
+      final parsed = parseCommand(
+        'Напомни мне через две минуты проверить уведомления',
+        'task',
+      );
+
+      expect(parsed.type, 'reminder');
+      expect(parsed.title, 'проверить уведомления');
+      expect(parsed.dueAt, isNotNull);
+      expect(
+        parsed.dueAt!.difference(before).inMinutes,
+        inInclusiveRange(1, 2),
+      );
+    });
   });
 }

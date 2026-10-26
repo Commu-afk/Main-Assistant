@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../../core/utils/command_parser.dart';
 import '../../data/database/task_database.dart';
+import '../reminders/notification_service.dart';
+import '../reminders/reminder_scheduler.dart';
 import '../stt/sherpa_stt_service.dart';
 import '../tts/sherpa_tts_service.dart';
 
@@ -35,14 +37,22 @@ class _AssistantScreenState extends State<AssistantScreen> {
     super.initState();
     _loadEntries();
     _initSherpa();
+    ReminderScheduler.instance.addListener(_onRemindersChanged);
   }
 
   @override
   void dispose() {
+    ReminderScheduler.instance.removeListener(_onRemindersChanged);
     _titleController.dispose();
     _searchController.dispose();
     _sherpa.cancel();
     super.dispose();
+  }
+
+  /// Планировщик показал напоминание — обновляем список, чтобы был виден
+  /// статус «уведомлено».
+  void _onRemindersChanged() {
+    if (mounted) _loadEntries();
   }
 
   Future<void> _initSherpa() async {
@@ -155,6 +165,31 @@ class _AssistantScreenState extends State<AssistantScreen> {
     });
   }
 
+  Future<void> _checkReminders() async {
+    final fired = await ReminderScheduler.instance.checkNow();
+    if (!mounted) return;
+    await _loadEntries();
+    if (!mounted) return;
+    _showMessage(
+      fired == 0 ? 'Срочных напоминаний нет' : 'Показано уведомлений: $fired',
+    );
+  }
+
+  Future<void> _testNotification() async {
+    final service = NotificationService.instance;
+    final shown = await service.show(
+      title: 'Мой ассистент',
+      body: 'Уведомления работают: сюда придёт напоминание.',
+    );
+    if (!mounted) return;
+    _showMessage(
+      shown
+          ? 'Уведомление отправлено'
+          : 'Уведомления недоступны: '
+              '${service.lastError ?? 'платформа не поддерживается'}',
+    );
+  }
+
   Future<void> _loadEntries() async {
     try {
       final entries = await TaskDatabase.instance.getTasks();
@@ -181,7 +216,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
     if (parsed.title.isEmpty) {
       _showMessage(
         'Не удалось определить название. Например: '
-        'Добавь задачу купить молоко завтра в 18:00',
+        'Напомни завтра в 9:00 купить хлеб',
       );
       return;
     }
@@ -384,6 +419,26 @@ class _AssistantScreenState extends State<AssistantScreen> {
       appBar: AppBar(
         title: const Text('Мой ассистент'),
         centerTitle: true,
+        actions: [
+          PopupMenuButton<String>(
+            tooltip: 'Напоминания',
+            icon: const Icon(Icons.notifications_outlined),
+            onSelected: (value) {
+              if (value == 'check') _checkReminders();
+              if (value == 'test') _testNotification();
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'check',
+                child: Text('Проверить напоминания'),
+              ),
+              PopupMenuItem(
+                value: 'test',
+                child: Text('Тест уведомления'),
+              ),
+            ],
+          ),
+        ],
       ),
       body: Center(
         child: ConstrainedBox(
@@ -408,7 +463,7 @@ class _AssistantScreenState extends State<AssistantScreen> {
                             controller: _titleController,
                             decoration: const InputDecoration(
                               labelText: 'Введите команду',
-                              hintText: 'Добавь задачу купить молоко завтра в 18:00',
+                              hintText: 'Напомни через 5 минут позвонить маме',
                               border: OutlineInputBorder(),
                             ),
                             onSubmitted: (_) => _addEntry(),
@@ -601,6 +656,25 @@ class _AssistantScreenState extends State<AssistantScreen> {
                                   final done = entry['is_done'] == 1;
                                   final type = entry['type'] as String? ?? 'task';
                                   final dueAt = entry['due_at'] as String?;
+                                  final notifiedAt = entry['notified_at'] as String?;
+                                  final due = dueAt == null
+                                      ? null
+                                      : DateTime.tryParse(dueAt);
+                                  final overdue = due != null &&
+                                      !done &&
+                                      !due.isAfter(DateTime.now());
+
+                                  final subtitle = StringBuffer(_typeLabel(type));
+                                  if (dueAt != null) {
+                                    subtitle.write('\n${_formatDate(dueAt)}');
+                                  }
+                                  if (overdue) {
+                                    subtitle.write(
+                                      notifiedAt == null
+                                          ? ' · срок наступил'
+                                          : ' · уведомлено',
+                                    );
+                                  }
 
                                   return Card(
                                     child: ListTile(
@@ -621,8 +695,14 @@ class _AssistantScreenState extends State<AssistantScreen> {
                                         ),
                                       ),
                                       subtitle: Text(
-                                        '${_typeLabel(type)}'
-                                        '${dueAt == null ? '' : '\n${_formatDate(dueAt)}'}',
+                                        subtitle.toString(),
+                                        style: overdue
+                                            ? TextStyle(
+                                                color: Theme.of(context)
+                                                    .colorScheme
+                                                    .error,
+                                              )
+                                            : null,
                                       ),
                                       isThreeLine: dueAt != null,
                                       trailing: IconButton(

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../features/assistant/assistant_screen.dart';
 import '../features/chat/chat_screen.dart';
+import '../features/reminders/reminder_scheduler.dart';
 
 /// Нижняя навигация: записи и чат с локальной моделью.
 class AppShell extends StatefulWidget {
@@ -18,6 +19,18 @@ class _AppShellState extends State<AppShell> {
   /// грузиться при запуске, если пользователь работает только с задачами.
   /// Дальше IndexedStack держит экран живым.
   bool _chatOpened = false;
+
+  @override
+  void initState() {
+    super.initState();
+    ReminderScheduler.instance.start();
+  }
+
+  @override
+  void dispose() {
+    ReminderScheduler.instance.stop();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {

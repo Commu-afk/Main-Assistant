@@ -26,7 +26,7 @@ class TaskDatabase {
 
     _database = await sql.openDatabase(
       dbPath,
-      version: 2,
+      version: 3,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE tasks (
@@ -36,7 +36,8 @@ class TaskDatabase {
             created_at TEXT NOT NULL,
             type TEXT NOT NULL DEFAULT 'task',
             due_at TEXT,
-            description TEXT
+            description TEXT,
+            notified_at TEXT
           )
         ''');
       },
@@ -47,6 +48,9 @@ class TaskDatabase {
           );
           await db.execute('ALTER TABLE tasks ADD COLUMN due_at TEXT');
           await db.execute('ALTER TABLE tasks ADD COLUMN description TEXT');
+        }
+        if (oldVersion < 3) {
+          await db.execute('ALTER TABLE tasks ADD COLUMN notified_at TEXT');
         }
       },
     );
@@ -87,5 +91,27 @@ class TaskDatabase {
   Future<void> deleteTask(int id) async {
     final db = await database;
     await db.delete('tasks', where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// Записи, у которых срок уже наступил, а уведомления ещё не было.
+  Future<List<Map<String, Object?>>> getDueEntries({DateTime? now}) async {
+    final db = await database;
+    return db.query(
+      'tasks',
+      where: 'is_done = 0 AND due_at IS NOT NULL AND notified_at IS NULL '
+          'AND due_at <= ?',
+      whereArgs: [(now ?? DateTime.now()).toIso8601String()],
+      orderBy: 'due_at ASC',
+    );
+  }
+
+  Future<void> markNotified(int id, {DateTime? at}) async {
+    final db = await database;
+    await db.update(
+      'tasks',
+      {'notified_at': (at ?? DateTime.now()).toIso8601String()},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
 }
