@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../llm/llm_config.dart';
 import '../llm/llm_service.dart';
+import '../settings/app_settings.dart';
 import '../stt/sherpa_stt_service.dart';
 import '../tts/sherpa_tts_service.dart';
 
@@ -26,6 +27,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final _llm = LlmService.instance;
   final _sherpa = SherpaSttService.instance;
   final _tts = SherpaTtsService.instance;
+  final _settings = AppSettings.instance;
 
   final TextEditingController _input = TextEditingController();
   final ScrollController _scroll = ScrollController();
@@ -37,6 +39,9 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _recording = false;
   bool _transcribing = false;
   bool _speaking = false;
+
+  /// Генерацию прервал пользователь — автоозвучку в этом случае не запускаем.
+  bool _generationStopped = false;
   String _status = 'Загрузка модели…';
 
   @override
@@ -81,12 +86,22 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _busy || _loading) return;
+
+    _input.clear();
+    await _sendText(text);
+  }
+
+  Future<void> _sendText(String text) async {
+    if (text.isEmpty || _busy || _loading) return;
     if (!_llm.isReady) {
       _showMessage('Модель не загружена');
       return;
     }
 
-    _input.clear();
+    // Новый вопрос важнее старой озвучки.
+    if (_speaking) await _stopSpeaking();
+
+    _generationStopped = false;
     final answer = _ChatMessage(fromUser: false);
 
     setState(() {
@@ -97,6 +112,7 @@ class _ChatScreenState extends State<ChatScreen> {
     });
     _scrollToBottom();
 
+    var failed = false;
     try {
       await for (final delta in _llm.reply(text)) {
         if (!mounted) return;
@@ -113,6 +129,7 @@ class _ChatScreenState extends State<ChatScreen> {
             : 'Готово: $tokens ток. за ${(seconds / 1000).toStringAsFixed(1)} с';
       });
     } catch (e) {
+      failed = true;
       if (!mounted) return;
       setState(() {
         _status = 'Ошибка генерации: $e';
@@ -122,9 +139,16 @@ class _ChatScreenState extends State<ChatScreen> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+
+    if (!mounted || failed || _generationStopped) return;
+
+    final reply = answer.text.trim();
+    if (reply.isEmpty || !_settings.autoSpeak) return;
+    await _startSpeaking(reply);
   }
 
   Future<void> _stop() async {
+    _generationStopped = true;
     _llm.cancel();
     if (!mounted) return;
     setState(() {
@@ -142,7 +166,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _toggleRecording() async {
-    if (_transcribing) return;
+    if (_transcribing || _loading) return;
 
     if (_recording) {
       setState(() {
@@ -151,27 +175,45 @@ class _ChatScreenState extends State<ChatScreen> {
         _status = 'Распознаю…';
       });
 
+      String? recognized;
+      String? error;
       try {
-        final text = await _sherpa.stopAndTranscribe();
-        if (!mounted) return;
-
-        setState(() {
-          if (text.isEmpty) {
-            _status = 'Ничего не распознано, попробуйте ещё раз';
-          } else {
-            _input.text = text;
-            _input.selection = TextSelection.collapsed(offset: text.length);
-            _status = 'Распознано: $text';
-          }
-        });
+        recognized = await _sherpa.stopAndTranscribe();
       } catch (e) {
-        if (!mounted) return;
-        setState(() => _status = 'Ошибка распознавания: $e');
+        error = '$e';
       } finally {
         if (mounted) setState(() => _transcribing = false);
       }
+
+      if (!mounted) return;
+      if (error != null) {
+        setState(() => _status = 'Ошибка распознавания: $error');
+        return;
+      }
+
+      final text = recognized?.trim() ?? '';
+      if (text.isEmpty) {
+        setState(() => _status = 'Ничего не распознано, попробуйте ещё раз');
+        return;
+      }
+
+      if (_settings.voiceLoop) {
+        // Голосовой цикл: распознали — сразу спрашиваем модель.
+        setState(() => _status = 'Распознано: $text');
+        await _sendText(text);
+      } else {
+        setState(() {
+          _input.text = text;
+          _input.selection = TextSelection.collapsed(offset: text.length);
+          _status = 'Распознано: $text';
+        });
+      }
       return;
     }
+
+    // Запись важнее текущей озвучки и генерации.
+    if (_speaking) await _stopSpeaking();
+    if (_busy) await _stop();
 
     try {
       await _sherpa.startRecording();
@@ -192,15 +234,13 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _speak(String text) async {
     if (_speaking) {
-      await _tts.stop();
-      if (!mounted) return;
-      setState(() {
-        _speaking = false;
-        _status = 'Озвучка остановлена';
-      });
+      await _stopSpeaking();
       return;
     }
+    await _startSpeaking(text);
+  }
 
+  Future<void> _startSpeaking(String text) async {
     setState(() {
       _speaking = true;
       _status = 'Синтезирую речь…';
@@ -216,6 +256,15 @@ class _ChatScreenState extends State<ChatScreen> {
     } finally {
       if (mounted) setState(() => _speaking = false);
     }
+  }
+
+  Future<void> _stopSpeaking() async {
+    await _tts.stop();
+    if (!mounted) return;
+    setState(() {
+      _speaking = false;
+      _status = 'Озвучка остановлена';
+    });
   }
 
   Future<void> _pickModelPath() async {
@@ -265,6 +314,16 @@ class _ChatScreenState extends State<ChatScreen> {
     await _loadModel(path: path.isEmpty ? null : path);
   }
 
+  Future<void> _toggleVoiceSetting(String key) async {
+    switch (key) {
+      case 'autoSpeak':
+        await _settings.setAutoSpeak(!_settings.autoSpeak);
+      case 'voiceLoop':
+        await _settings.setVoiceLoop(!_settings.voiceLoop);
+    }
+    if (mounted) setState(() {});
+  }
+
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scroll.hasClients) return;
@@ -290,6 +349,23 @@ class _ChatScreenState extends State<ChatScreen> {
         title: const Text('Чат'),
         centerTitle: true,
         actions: [
+          PopupMenuButton<String>(
+            tooltip: 'Голосовые настройки',
+            icon: const Icon(Icons.tune),
+            onSelected: _toggleVoiceSetting,
+            itemBuilder: (context) => [
+              CheckedPopupMenuItem(
+                value: 'autoSpeak',
+                checked: _settings.autoSpeak,
+                child: const Text('Озвучивать ответы'),
+              ),
+              CheckedPopupMenuItem(
+                value: 'voiceLoop',
+                checked: _settings.voiceLoop,
+                child: const Text('Сразу отправлять распознанное'),
+              ),
+            ],
+          ),
           IconButton(
             tooltip: 'Путь к модели',
             onPressed: _loading ? null : _pickModelPath,
@@ -350,6 +426,17 @@ class _ChatScreenState extends State<ChatScreen> {
                 label: const Text('Указать путь к модели'),
               ),
             ],
+            if (!_loading && _llm.isReady) ...[
+              const SizedBox(height: 20),
+              Text(
+                _settings.voiceLoop
+                    ? 'Нажмите 🎤, скажите вопрос и нажмите стоп — '
+                        'ответ придёт и озвучится сам'
+                    : 'Нажмите 🎤 и скажите вопрос — текст попадёт в поле ввода',
+                style: Theme.of(context).textTheme.bodySmall,
+                textAlign: TextAlign.center,
+              ),
+            ],
           ],
         ),
       ),
@@ -408,7 +495,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
                 const SizedBox(width: 4),
                 IconButton.filledTonal(
-                  tooltip: _recording ? 'Стоп и распознать' : 'Сказать голосом',
+                  tooltip: _recording
+                      ? 'Стоп и распознать'
+                      : (_settings.voiceLoop
+                          ? 'Сказать голосом (сразу отправится)'
+                          : 'Сказать голосом'),
                   onPressed: _loading || _transcribing ? null : _toggleRecording,
                   icon: Icon(_recording ? Icons.stop : Icons.mic),
                 ),
@@ -433,9 +524,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
                 if (_speaking)
                   TextButton(
-                    onPressed: () => _tts.stop().then(
-                      (_) => mounted ? setState(() => _speaking = false) : null,
-                    ),
+                    onPressed: _stopSpeaking,
                     child: const Text('Стоп озвучку'),
                   ),
               ],
