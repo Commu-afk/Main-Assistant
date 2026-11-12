@@ -1,0 +1,211 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+
+/// Настройки локальной LLM: где лежит GGUF-модель и как генерировать ответ.
+///
+/// Модель весит ~1 ГБ, поэтому в assets её не пакуем: ищем файл рядом с
+/// приложением и в рабочей папке проекта. Путь можно задать вручную —
+/// он сохраняется в support-dir и имеет приоритет.
+class LlmConfig {
+  LlmConfig._();
+
+  /// Модель Qwen2.5-1.5B-Instruct, квантование Q4_K_M (~1 ГБ) — быстрый ответ.
+  static const String defaultQwenName = 'qwen2.5-1.5b-instruct-q4_k_m.gguf';
+
+  /// Gemma-3-1B-it, квантование Q4_K_M — аккуратнее в рассуждениях.
+  static const String defaultGemmaName = 'gemma-3-1b-it-Q4_K_M.gguf';
+
+  /// Модель по умолчанию: Qwen2.5-1.5B-Instruct.
+  static const String defaultModelName = defaultQwenName;
+
+  /// Переменная окружения для явного пути к модели.
+  static const String envVar = 'LOCAL_ASSISTANT_MODEL';
+
+  /// Системная инструкция ассистента.
+  static const String systemPrompt =
+      'Ты — локальный голосовой ассистент. Отвечай по-русски, кратко и по '
+      'делу: обычно одно-три предложения. Без списков и Markdown, потому что '
+      'ответ может читаться вслух. Если не знаешь ответа, скажи об этом прямо.';
+
+  static const int contextSize = 4096;
+  static const int maxTokens = 320;
+
+  static const String _settingsFile = 'llm_settings.json';
+
+  static Future<File> _settingsFileHandle() async {
+    final dir = await getApplicationSupportDirectory();
+    return File(p.join(dir.path, _settingsFile));
+  }
+
+  /// Путь, выбранный пользователем вручную, или null.
+  static Future<String?> savedPath() async {
+    try {
+      final file = await _settingsFileHandle();
+      if (!await file.exists()) return null;
+
+      final data = jsonDecode(await file.readAsString());
+      if (data is! Map) return null;
+
+      final value = data['modelPath'];
+      return value is String && value.trim().isNotEmpty ? value.trim() : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Сохраняет (или сбрасывает при null) ручной путь к модели.
+  static Future<void> savePath(String? path) async {
+    final file = await _settingsFileHandle();
+    await file.parent.create(recursive: true);
+
+    final clean = path?.trim();
+    if (clean == null || clean.isEmpty) {
+      if (await file.exists()) await file.delete();
+      return;
+    }
+
+    await file.writeAsString(jsonEncode({'modelPath': clean}), flush: true);
+  }
+
+  /// Папки, в которых имеет смысл искать любую gguf-модель.
+  static Future<List<String>> searchDirs() async {
+    final dirs = <String>[
+      p.join(p.dirname(Platform.resolvedExecutable), 'models'),
+      p.join(Directory.current.path, 'assets', 'models'),
+    ];
+
+    try {
+      dirs.add(p.join((await getApplicationSupportDirectory()).path, 'models'));
+    } catch (_) {
+      // На платформах без path_provider просто пропускаем.
+    }
+
+    return dirs;
+  }
+
+  /// Список доступных GGUF-моделей во всех известных папках.
+  static Future<List<String>> availableModels() async {
+    final models = <String>[];
+    final seen = <String>{};
+
+    for (final dir in await searchDirs()) {
+      final list = await ggufFilesIn(dir);
+      for (final file in list) {
+        if (seen.add(file)) {
+          models.add(file);
+        }
+      }
+    }
+
+    models.sort((a, b) {
+      final an = p.basename(a).toLowerCase();
+      final bn = p.basename(b).toLowerCase();
+      if (an.contains('qwen') && !bn.contains('qwen')) return -1;
+      if (bn.contains('qwen') && !an.contains('qwen')) return 1;
+      if (an.contains('gemma') && !bn.contains('gemma')) return -1;
+      if (bn.contains('gemma') && !an.contains('gemma')) return 1;
+      return an.compareTo(bn);
+    });
+
+    return models;
+  }
+
+  /// Все .gguf файлы в директории.
+  static Future<List<String>> ggufFilesIn(String dirPath) async {
+    final dir = Directory(dirPath);
+    if (!await dir.exists()) return const [];
+    final files = <String>[];
+    await for (final entity in dir.list(followLinks: false)) {
+      if (entity is! File) continue;
+      final name = p.basename(entity.path).toLowerCase();
+      if (!name.endsWith('.gguf')) continue;
+      if (name.endsWith('.part') || name.endsWith('.tmp')) continue;
+      files.add(entity.path);
+    }
+    files.sort((a, b) => p.basename(a).compareTo(p.basename(b)));
+    return files;
+  }
+
+  /// Явные кандидаты в порядке приоритета.
+  static Future<List<String>> candidatePaths({String? preferredModelId}) async {
+    final candidates = <String>[];
+
+    final override = Platform.environment[envVar];
+    if (override != null && override.trim().isNotEmpty) {
+      candidates.add(override.trim());
+    }
+
+    // Явный выбор модели в настройках важнее старого сохранённого пути:
+    // диалог «путь к .gguf» больше не используется.
+    if (preferredModelId != null && preferredModelId.trim().isNotEmpty) {
+      final id = preferredModelId.trim();
+      for (final dir in await searchDirs()) {
+        candidates.add(p.join(dir, id));
+      }
+      for (final model in await availableModels()) {
+        if (p.basename(model).toLowerCase() == id.toLowerCase()) {
+          candidates.add(model);
+        }
+      }
+    }
+
+    final saved = await savedPath();
+    if (saved != null) candidates.add(saved);
+
+    final dirs = await searchDirs();
+    for (final dir in dirs) {
+      candidates.add(p.join(dir, defaultModelName));
+      candidates.add(p.join(dir, defaultGemmaName));
+    }
+
+    for (final model in await availableModels()) {
+      candidates.add(model);
+    }
+
+    return candidates;
+  }
+
+  /// Ищет модель: сначала точные пути, потом любой .gguf в известных папках.
+  static Future<String?> resolve({String? preferredModelId}) async {
+    for (final path in await candidatePaths(
+      preferredModelId: preferredModelId,
+    )) {
+      if (await File(path).exists()) return path;
+    }
+
+    for (final dir in await searchDirs()) {
+      final found = await firstGgufIn(dir);
+      if (found != null) return found;
+    }
+
+    return null;
+  }
+
+  /// Первый по алфавиту .gguf в папке, кроме недокачанных (.part/.tmp).
+  static Future<String?> firstGgufIn(String dirPath) async {
+    final dir = Directory(dirPath);
+    if (!await dir.exists()) return null;
+
+    final files = <File>[];
+    await for (final entity in dir.list(followLinks: false)) {
+      if (entity is! File) continue;
+      final name = p.basename(entity.path).toLowerCase();
+      if (!name.endsWith('.gguf')) continue;
+      if (name.endsWith('.part') || name.endsWith('.tmp')) continue;
+      files.add(entity);
+    }
+
+    if (files.isEmpty) return null;
+    files.sort((a, b) => a.path.compareTo(b.path));
+    return files.first.path;
+  }
+
+  /// Куда положить модель, если её нет (первая папка поиска).
+  static Future<String> suggestedPath() async {
+    final dirs = await searchDirs();
+    return p.join(dirs.first, defaultModelName);
+  }
+}
