@@ -1,1 +1,5 @@
-# Main-Assistant
+<<<<<<< HEAD
+... remote version ...
+=======
+... your local version ...
+>>>>>>> 42cf64b (Первоначальная загрузка проекта)
