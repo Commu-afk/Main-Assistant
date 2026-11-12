@@ -40,6 +40,9 @@ class SherpaConfig {
   /// Служебные файлы, которые не нужны рантайму.
   static const Set<String> _ignoredNames = {'.gitkeep'};
 
+  /// Маркер успешной синхронизации: список ассетов на момент копирования.
+  static const String _markerName = '.synced';
+
   /// Возвращает локальные пути к файлам модели, копируя их из assets при
   /// необходимости.
   static Future<SherpaModelFiles> load() async {
@@ -71,6 +74,17 @@ class SherpaConfig {
       );
     }
 
+    // rootBundle.load читает файл целиком, а encoder.int8.onnx весит ~71 МБ.
+    // Поэтому на каждом старте проверяем только маркер и наличие файлов:
+    // байты читаются лишь при первом запуске или после обновления модели.
+    final marker = File(p.join(targetDir.path, _markerName));
+    final signature = assets.join('\n');
+    if (await marker.exists() &&
+        await marker.readAsString() == signature &&
+        await _targetsPresent(targetDir, assets)) {
+      return targetDir.path;
+    }
+
     for (final asset in assets) {
       final name = p.basename(asset);
       if (_ignoredNames.contains(name)) continue;
@@ -89,17 +103,30 @@ class SherpaConfig {
       );
     }
 
+    await marker.writeAsString(signature, flush: true);
     return targetDir.path;
+  }
+
+  static Future<bool> _targetsPresent(
+    Directory dir,
+    List<String> assets,
+  ) async {
+    for (final asset in assets) {
+      final name = p.basename(asset);
+      if (_ignoredNames.contains(name)) continue;
+
+      final file = File(p.join(dir.path, name));
+      if (!await file.exists() || await file.length() == 0) return false;
+    }
+    return true;
   }
 
   static Future<List<String>> _listModelAssets() async {
     final manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
     final prefix = '$assetDir/';
-    final assets = manifest
-        .listAssets()
-        .where((a) => a.startsWith(prefix))
-        .toList()
-      ..sort();
+    final assets =
+        manifest.listAssets().where((a) => a.startsWith(prefix)).toList()
+          ..sort();
     return assets;
   }
 
@@ -118,7 +145,10 @@ class SherpaConfig {
     final decoder = _pickByPrefix(names, 'decoder');
     final joiner = _pickByPrefix(names, 'joiner');
 
-    if (tokens == null || encoder == null || decoder == null || joiner == null) {
+    if (tokens == null ||
+        encoder == null ||
+        decoder == null ||
+        joiner == null) {
       return null;
     }
 
@@ -154,7 +184,8 @@ class SherpaConfig {
   /// Тип модели для Sherpa. Пустая строка — автоопределение по метаданным.
   static String detectModelType(String dir) {
     final lower = dir.toLowerCase();
-    if (lower.contains('nemo_transducer') || lower.contains('nemo-transducer')) {
+    if (lower.contains('nemo_transducer') ||
+        lower.contains('nemo-transducer')) {
       return 'nemo_transducer';
     }
     return '';

@@ -28,12 +28,13 @@ class LlmService {
   String? get lastError => _lastError;
 
   /// Загружает модель. Повторный вызов с тем же путём ничего не делает.
-  Future<void> initialize({String? path}) async {
-    final target = path ?? await LlmConfig.resolve();
+  Future<void> initialize({String? path, String? preferredModelId}) async {
+    final target =
+        path ?? await LlmConfig.resolve(preferredModelId: preferredModelId);
     if (target == null) {
       _lastError = 'GGUF-модель не найдена';
       throw StateError(
-        'Модель не найдена. Положите файл ${LlmConfig.defaultModelName} '
+        'Модель не найдена. Положите GGUF-файл (Qwen/Gemma) '
         'в папку models рядом с приложением или укажите путь вручную.',
       );
     }
@@ -65,8 +66,23 @@ class LlmService {
     }
   }
 
+  String _buildThoughtfulPrompt(String text, {bool think = false}) {
+    if (!think) return text;
+    return 'Ты — внимательный локальный ассистент. Подумай над вопросом про '
+        'себя, но не выводи рассуждения.\n'
+        'Ответь по-русски кратко (1–3 предложения), без списков и Markdown.\n'
+        'Если из вопроса следует дело, которое стоит запомнить, добавь в конце '
+        'одну строку «Задача: <короткая формулировка>» — только если это '
+        'действительно уместно.\n'
+        'Вопрос: $text';
+  }
+
   /// Потоковый ответ модели: отдаёт куски текста по мере генерации.
-  Stream<String> reply(String text, {int? maxTokens}) async* {
+  Stream<String> reply(
+    String text, {
+    int? maxTokens,
+    bool thinkBeforeAnswer = false,
+  }) async* {
     final session = _session;
     if (session == null) {
       throw StateError('Модель не загружена');
@@ -78,13 +94,15 @@ class LlmService {
 
     final params = GenerationParams(
       maxTokens: maxTokens ?? LlmConfig.maxTokens,
-      temp: 0.7,
-      topK: 40,
-      topP: 0.9,
+      temp: thinkBeforeAnswer ? 0.4 : 0.7,
+      topK: thinkBeforeAnswer ? 30 : 40,
+      topP: thinkBeforeAnswer ? 0.85 : 0.9,
     );
 
+    final prompt = _buildThoughtfulPrompt(text, think: thinkBeforeAnswer);
+
     await for (final chunk in session.create(
-      [LlamaTextContent(text)],
+      [LlamaTextContent(prompt)],
       params: params,
       enableThinking: false,
     )) {

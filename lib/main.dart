@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -14,12 +15,29 @@ Future<void> main(List<String> args) async {
     sqfliteFfiInit();
   }
 
-  await AppSettings.instance.load();
-
+  final startup = Stopwatch()..start();
   final startHidden = args.contains('--hidden');
-  await DesktopLifecycle.instance.initialize(startHidden: startHidden);
+
+  // Настройки и трей не нужны для первого кадра: запускаем их в фоне.
+  // Окно показывается по первому кадру (SetNextFrameCallback в runner).
+  final settingsReady = AppSettings.instance.load();
+  final desktopReady = DesktopLifecycle.instance.initialize(
+    startHidden: startHidden,
+  );
 
   runApp(const LocalAssistantApp());
+
+  WidgetsBinding.instance.addPostFrameCallback((_) async {
+    debugPrint('[startup] первый кадр: ${startup.elapsedMilliseconds} мс');
+
+    try {
+      await Future.wait([settingsReady, desktopReady]);
+    } catch (e) {
+      debugPrint('Фоновая инициализация не удалась: $e');
+    }
+
+    debugPrint('[startup] трей и настройки: ${startup.elapsedMilliseconds} мс');
+  });
 }
 
 class LocalAssistantApp extends StatelessWidget {

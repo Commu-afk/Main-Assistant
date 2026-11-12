@@ -12,8 +12,14 @@ import 'package:path_provider/path_provider.dart';
 class LlmConfig {
   LlmConfig._();
 
-  /// Модель по умолчанию: Qwen2.5-1.5B-Instruct, квантование Q4_K_M (~1 ГБ).
-  static const String defaultModelName = 'qwen2.5-1.5b-instruct-q4_k_m.gguf';
+  /// Модель Qwen2.5-1.5B-Instruct, квантование Q4_K_M (~1 ГБ) — быстрый ответ.
+  static const String defaultQwenName = 'qwen2.5-1.5b-instruct-q4_k_m.gguf';
+
+  /// Gemma-3-1B-it, квантование Q4_K_M — аккуратнее в рассуждениях.
+  static const String defaultGemmaName = 'gemma-3-1b-it-Q4_K_M.gguf';
+
+  /// Модель по умолчанию: Qwen2.5-1.5B-Instruct.
+  static const String defaultModelName = defaultQwenName;
 
   /// Переменная окружения для явного пути к модели.
   static const String envVar = 'LOCAL_ASSISTANT_MODEL';
@@ -80,13 +86,70 @@ class LlmConfig {
     return dirs;
   }
 
+  /// Список доступных GGUF-моделей во всех известных папках.
+  static Future<List<String>> availableModels() async {
+    final models = <String>[];
+    final seen = <String>{};
+
+    for (final dir in await searchDirs()) {
+      final list = await ggufFilesIn(dir);
+      for (final file in list) {
+        if (seen.add(file)) {
+          models.add(file);
+        }
+      }
+    }
+
+    models.sort((a, b) {
+      final an = p.basename(a).toLowerCase();
+      final bn = p.basename(b).toLowerCase();
+      if (an.contains('qwen') && !bn.contains('qwen')) return -1;
+      if (bn.contains('qwen') && !an.contains('qwen')) return 1;
+      if (an.contains('gemma') && !bn.contains('gemma')) return -1;
+      if (bn.contains('gemma') && !an.contains('gemma')) return 1;
+      return an.compareTo(bn);
+    });
+
+    return models;
+  }
+
+  /// Все .gguf файлы в директории.
+  static Future<List<String>> ggufFilesIn(String dirPath) async {
+    final dir = Directory(dirPath);
+    if (!await dir.exists()) return const [];
+    final files = <String>[];
+    await for (final entity in dir.list(followLinks: false)) {
+      if (entity is! File) continue;
+      final name = p.basename(entity.path).toLowerCase();
+      if (!name.endsWith('.gguf')) continue;
+      if (name.endsWith('.part') || name.endsWith('.tmp')) continue;
+      files.add(entity.path);
+    }
+    files.sort((a, b) => p.basename(a).compareTo(p.basename(b)));
+    return files;
+  }
+
   /// Явные кандидаты в порядке приоритета.
-  static Future<List<String>> candidatePaths() async {
+  static Future<List<String>> candidatePaths({String? preferredModelId}) async {
     final candidates = <String>[];
 
     final override = Platform.environment[envVar];
     if (override != null && override.trim().isNotEmpty) {
       candidates.add(override.trim());
+    }
+
+    // Явный выбор модели в настройках важнее старого сохранённого пути:
+    // диалог «путь к .gguf» больше не используется.
+    if (preferredModelId != null && preferredModelId.trim().isNotEmpty) {
+      final id = preferredModelId.trim();
+      for (final dir in await searchDirs()) {
+        candidates.add(p.join(dir, id));
+      }
+      for (final model in await availableModels()) {
+        if (p.basename(model).toLowerCase() == id.toLowerCase()) {
+          candidates.add(model);
+        }
+      }
     }
 
     final saved = await savedPath();
@@ -95,14 +158,21 @@ class LlmConfig {
     final dirs = await searchDirs();
     for (final dir in dirs) {
       candidates.add(p.join(dir, defaultModelName));
+      candidates.add(p.join(dir, defaultGemmaName));
+    }
+
+    for (final model in await availableModels()) {
+      candidates.add(model);
     }
 
     return candidates;
   }
 
   /// Ищет модель: сначала точные пути, потом любой .gguf в известных папках.
-  static Future<String?> resolve() async {
-    for (final path in await candidatePaths()) {
+  static Future<String?> resolve({String? preferredModelId}) async {
+    for (final path in await candidatePaths(
+      preferredModelId: preferredModelId,
+    )) {
       if (await File(path).exists()) return path;
     }
 

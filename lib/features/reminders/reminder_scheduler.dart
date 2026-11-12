@@ -57,9 +57,10 @@ class ReminderScheduler extends ChangeNotifier {
         final id = entry['id'] as int;
         final title = (entry['title'] as String? ?? '').trim();
         final type = entry['type'] as String? ?? 'task';
+        final tag = entry['tag'] as String?;
 
         final shown = await _notifications.show(
-          title: _typeLabel(type),
+          title: tag == null ? _typeLabel(type) : '$tag · ${_typeLabel(type)}',
           body: title.isEmpty ? 'Пора заняться записью' : title,
         );
         if (!shown) break;

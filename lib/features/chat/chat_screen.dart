@@ -66,7 +66,7 @@ class _ChatScreenState extends State<ChatScreen> {
     });
 
     try {
-      await _llm.initialize(path: path);
+      await _llm.initialize(path: path, preferredModelId: _settings.llmModelId);
       if (!mounted) return;
 
       final name = _llm.modelPath?.split(RegExp(r'[\\/]')).last;
@@ -114,7 +114,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
     var failed = false;
     try {
-      await for (final delta in _llm.reply(text)) {
+      await for (final delta in _llm.reply(
+        text,
+        thinkBeforeAnswer: _settings.llmThinkBeforeAnswer,
+      )) {
         if (!mounted) return;
         setState(() => answer.text += delta);
         _scrollToBottom();
@@ -268,50 +271,144 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _pickModelPath() async {
-    final controller = TextEditingController(text: _llm.modelPath ?? '');
+    final available = await LlmConfig.availableModels();
+    if (!mounted) return;
 
-    final path = await showDialog<String>(
+    String? selected =
+        _settings.llmModelId ?? _llm.modelPath?.split(RegExp(r'[\\/]')).last;
+
+    final result = await showDialog<_ModelSelection>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Путь к GGUF-модели'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            TextField(
-              controller: controller,
-              autofocus: true,
-              decoration: const InputDecoration(
-                labelText: 'Полный путь к .gguf',
-                border: OutlineInputBorder(),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          final theme = Theme.of(context);
+
+          return Dialog(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 480, maxHeight: 520),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text(
+                      'Модель и рассуждения',
+                      style: theme.textTheme.titleLarge,
+                    ),
+                    const SizedBox(height: 4),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Думать перед ответом'),
+                      subtitle: const Text(
+                        'Медленнее, но ответ вдумчивее: ассистент может '
+                        'предложить задачу или напоминание',
+                      ),
+                      value: _settings.llmThinkBeforeAnswer,
+                      onChanged: (value) async {
+                        await _settings.setLlmThinkBeforeAnswer(value);
+                        setDialogState(() {});
+                      },
+                    ),
+                    const Divider(),
+                    Text(
+                      'Доступные GGUF-модели',
+                      style: theme.textTheme.titleSmall,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Qwen — быстрее, Gemma — аккуратнее в рассуждениях.',
+                      style: theme.textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 8),
+                    Flexible(
+                      child: available.isEmpty
+                          ? Center(
+                              child: Text(
+                                'Модели не найдены.\nПоложите .gguf в папку '
+                                'models рядом с приложением.',
+                                textAlign: TextAlign.center,
+                                style: theme.textTheme.bodySmall,
+                              ),
+                            )
+                          : RadioGroup<String>(
+                              groupValue: selected,
+                              onChanged: (value) {
+                                if (value != null) {
+                                  setDialogState(() => selected = value);
+                                }
+                              },
+                              child: SingleChildScrollView(
+                                child: Column(
+                                  children: [
+                                    for (final modelPath in available)
+                                      RadioListTile<String>(
+                                        dense: true,
+                                        value: modelPath
+                                            .split(RegExp(r'[\\/]'))
+                                            .last,
+                                        title: Text(
+                                          modelPath
+                                              .split(RegExp(r'[\\/]'))
+                                              .last,
+                                        ),
+                                        subtitle: Text(
+                                          modelPath,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: theme.textTheme.bodySmall,
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                    ),
+                    const SizedBox(height: 4),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(context),
+                          child: const Text('Отмена'),
+                        ),
+                        TextButton(
+                          onPressed: () => Navigator.pop(
+                            context,
+                            _ModelSelection(useDefault: true),
+                          ),
+                          child: const Text('По умолчанию'),
+                        ),
+                        const SizedBox(width: 4),
+                        FilledButton(
+                          onPressed: () => Navigator.pop(
+                            context,
+                            _ModelSelection(modelId: selected),
+                          ),
+                          child: const Text('Применить'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
-            const SizedBox(height: 12),
-            Text(
-              'Модель не входит в сборку: файл нужно скачать отдельно. '
-              'По умолчанию ищется ${LlmConfig.defaultModelName}.',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Отмена'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, controller.text.trim()),
-            child: const Text('Загрузить'),
-          ),
-        ],
+          );
+        },
       ),
     );
 
-    controller.dispose();
-    if (path == null) return;
+    if (result == null) return;
 
-    await LlmConfig.savePath(path.isEmpty ? null : path);
-    await _loadModel(path: path.isEmpty ? null : path);
+    if (result.useDefault) {
+      await _settings.setLlmModelId(null);
+    } else if (result.modelId != null && result.modelId!.isNotEmpty) {
+      await _settings.setLlmModelId(result.modelId);
+    }
+
+    if (!mounted) return;
+    setState(() {});
+    await _loadModel();
   }
 
   Future<void> _toggleVoiceSetting(String key) async {
@@ -320,6 +417,10 @@ class _ChatScreenState extends State<ChatScreen> {
         await _settings.setAutoSpeak(!_settings.autoSpeak);
       case 'voiceLoop':
         await _settings.setVoiceLoop(!_settings.voiceLoop);
+      case 'think':
+        await _settings.setLlmThinkBeforeAnswer(
+          !_settings.llmThinkBeforeAnswer,
+        );
     }
     if (mounted) setState(() {});
   }
@@ -337,9 +438,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _showMessage(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
@@ -364,12 +464,17 @@ class _ChatScreenState extends State<ChatScreen> {
                 checked: _settings.voiceLoop,
                 child: const Text('Сразу отправлять распознанное'),
               ),
+              CheckedPopupMenuItem(
+                value: 'think',
+                checked: _settings.llmThinkBeforeAnswer,
+                child: const Text('Думать перед ответом'),
+              ),
             ],
           ),
           IconButton(
-            tooltip: 'Путь к модели',
+            tooltip: 'Модель и рассуждения',
             onPressed: _loading ? null : _pickModelPath,
-            icon: const Icon(Icons.folder_open),
+            icon: const Icon(Icons.memory),
           ),
           IconButton(
             tooltip: 'Новый чат',
@@ -384,7 +489,9 @@ class _ChatScreenState extends State<ChatScreen> {
           child: Column(
             children: [
               Expanded(
-                child: _messages.isEmpty ? _buildEmptyState() : _buildMessages(),
+                child: _messages.isEmpty
+                    ? _buildEmptyState()
+                    : _buildMessages(),
               ),
               _buildComposer(),
             ],
@@ -422,8 +529,8 @@ class _ChatScreenState extends State<ChatScreen> {
               const SizedBox(height: 16),
               FilledButton.tonalIcon(
                 onPressed: _pickModelPath,
-                icon: const Icon(Icons.folder_open),
-                label: const Text('Указать путь к модели'),
+                icon: const Icon(Icons.memory),
+                label: const Text('Выбрать модель'),
               ),
             ],
             if (!_loading && _llm.isReady) ...[
@@ -431,7 +538,7 @@ class _ChatScreenState extends State<ChatScreen> {
               Text(
                 _settings.voiceLoop
                     ? 'Нажмите 🎤, скажите вопрос и нажмите стоп — '
-                        'ответ придёт и озвучится сам'
+                          'ответ придёт и озвучится сам'
                     : 'Нажмите 🎤 и скажите вопрос — текст попадёт в поле ввода',
                 style: Theme.of(context).textTheme.bodySmall,
                 textAlign: TextAlign.center,
@@ -498,9 +605,11 @@ class _ChatScreenState extends State<ChatScreen> {
                   tooltip: _recording
                       ? 'Стоп и распознать'
                       : (_settings.voiceLoop
-                          ? 'Сказать голосом (сразу отправится)'
-                          : 'Сказать голосом'),
-                  onPressed: _loading || _transcribing ? null : _toggleRecording,
+                            ? 'Сказать голосом (сразу отправится)'
+                            : 'Сказать голосом'),
+                  onPressed: _loading || _transcribing
+                      ? null
+                      : _toggleRecording,
                   icon: Icon(_recording ? Icons.stop : Icons.mic),
                 ),
                 const SizedBox(width: 4),
@@ -534,6 +643,14 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
     );
   }
+}
+
+/// Результат диалога выбора модели.
+class _ModelSelection {
+  _ModelSelection({this.useDefault = false, this.modelId});
+
+  final bool useDefault;
+  final String? modelId;
 }
 
 class _MessageBubble extends StatelessWidget {
@@ -571,10 +688,7 @@ class _MessageBubble extends StatelessWidget {
             if (message.text.isEmpty && streaming)
               Text('…', style: theme.textTheme.bodyMedium)
             else
-              SelectableText(
-                message.text,
-                style: theme.textTheme.bodyMedium,
-              ),
+              SelectableText(message.text, style: theme.textTheme.bodyMedium),
             if (onSpeak != null) ...[
               const SizedBox(height: 4),
               InkWell(
